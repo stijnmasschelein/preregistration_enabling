@@ -1,0 +1,626 @@
+---
+title: "Simulation and Power Analysis"
+author: "Stijn Masschelein, Frank Ma"
+date: "`r Sys.Date()`"
+output: tint::tintHtml
+---
+
+You will have to install the `tint` package to get the nice 
+HTML output.
+
+```{r, include=FALSE, eval=FALSE}
+install.packages("tint")
+```
+
+## Learning function
+
+The following learning function seems to work relatively well 
+for me. 
+
+$$
+y = M * (1 - e^{(-St)})
+$$
+
+Where $y$ is performance, $t$ is time, $M$ is the maximum 
+performance person ever is going to get and $S$ is the speed 
+of learning. The idea is that the control system can improve
+$M$ and $S$. You can test the learning function but the 
+interpretation is relatively straight forward. Speed of learning
+can be a bit tricky but with $S > 0$, the participant is getting
+better over time, with $S < 0$, the participant is getting 
+worse over time.^[It's relatively easy to show that a participant
+will be at 90% of their maximum, $M$, when $t = \frac{ln(10)}{S} \approx 2.30 / S$.].
+
+The biggest disadvantage is that the speed of learning and 
+the maximum capacity are not independent from each other. If 
+a participants has a higher maximum, they learn more at the same
+speed. On the other hand, this is probably not the worst 
+assumption.
+
+$$
+\begin{aligned}
+\frac{y}{M} &= 1 - \exp(-St) \\
+-St &=  \ln(\frac{M - y}{M}) \\
+t &= -\frac{\ln \frac{M - y}{M}}{S}
+\end{aligned}
+$$
+
+```{r}
+calc_perf <- function(max = 100, speed = 1, time = 1:12){
+  performance = max * (1 - exp(-time * speed))
+}
+calc_time <- function(max = 100, speed = 1, performance = 50){
+  time = - (log ((max - performance)/max))/speed 
+}
+```
+
+The following figures show the performance for a slow learner
+with capacity 80, a fast learner with capacity 80, and a 
+fast learner with capacity 100. This should give you an idea how 
+to  
+
+```{r learning_function, fig.margin = TRUE}
+suppressMessages(library(tidyverse))
+library(cowplot)
+library(viridis)
+library(kableExtra)
+time <- 1:12
+perf <-  calc_perf(max = 80, speed = 0.1, time = time)
+qplot(y = perf, x = time, ylim = c(0, 100))
+perf <- calc_perf(max = 80, speed = 0.5, time = time)
+qplot(y = perf, x = time, ylim = c(0, 100))
+perf <- calc_perf(max = 100, speed = 0.5, time = time)
+qplot(y = perf, x = time, ylim = c(0, 100))
+```
+
+## The effect size.
+
+The t-statistics in Hannan et al.(2008) for a similar effect as
+that I expect to see in our experiment is $t = 1$ for the effect
+on total performance and $t = 2$ for the effect on learning
+(= trial 10-12 - trial 1-3).  More specifically, they find that
+the group with fine feedback has about $9\%$ better performance
+and improves $3$ times as much compared to the group with no 
+feedback in the individual incentive condition.
+
+## Representative parameters
+
+To get an idea of how big the difference between $M$ and $S$ is 
+between two conditions, I would like you to play around with the
+values for $M$ and $S$. Concretely, I want you to find values for
+a condition 1 ($M_1$, $S_1$) and a condition 2($M_2$, $S_2$), so
+that the total peformance in condition 1 is about 9% higher than
+in condition 2, and the improvement in condition 1 is about 3
+times the improvement in condition 2. You should experiment with
+the values in the `calc_perf` function to get the values for
+$M_1, S_1, M_2, S_2$. If that works, we can start simulating 
+fake data.
+
+I had to correct something in the calculation of the ratio.
+I also sped things up a bit by only looking for $M > 50$. 
+
+```{r}
+t <- c(1:12)
+an_array <- array(NA,c(100,10,12))
+
+for(s in seq(0.1,1,0.1)){
+  for(m in 1:100){
+    an_array[m,s*10,] <- calc_perf(max = m,speed = s,time = t)
+  }
+}
+matrix2 <- matrix(NA,1000,6)
+i=0
+for(s1 in seq(0.1,1,0.1)){
+    for(m1 in 50:100){
+        for(s2 in seq(0.1,1,0.1)){
+            for(m2 in 25:75){
+                ratio <- (mean(an_array[m1,s1*10,10:12]) - 
+                            mean(an_array[m1, s1*10, 1:3])) / 
+                         (mean(an_array[m2,s2*10,10:12]) -
+                           mean(an_array[m2,s2*10,1:3]))
+                tot_perf <- sum(an_array[m1,s1*10,1:12]) / 
+                             sum(an_array[m2,s2*10,1:12]) - 1
+                if (1.8 < ratio & ratio < 2.2 & 0.08< tot_perf & tot_perf<0.1){
+                    i=i+1
+                    matrix2[i,] <- c(m1,s1,m2,s2,ratio,tot_perf)
+                }
+            }
+        }
+    }
+}
+matrix2 <- matrix2[1:i,]
+```
+
+I just make this a bit easier to explore with a dataframe.
+
+```{r, fig.margin = T}
+colnames(matrix2) <- c("m1", "s1", "m2", "s2", "diff", "total")
+good_params <- as_tibble(matrix2) 
+good_params$s1 <- as.factor(good_params$s1) ## I changed the graph color by groups (factor)
+qplot(y = m1, x = m2, data = good_params, color = s1)
+```
+
+
+```{r}
+filter(good_params, m2 == 50)
+```
+
+A speed of .2 implies that by trial $ln(10)/.2 \approx 11.5$
+participants reach $90\%$ of their maximum capacity, $M$. (see
+foonote 1).
+
+```{r, margin.fig = TRUE}
+calc_outcomes = function(m1, m2, s1, s2, time){
+  n <- length(time)
+  perf1 <- calc_perf(max = m1, speed = s1, time = time)  
+  perf2 <- calc_perf(max = m2, speed = s2, time = time)
+  total <- sum(perf1)/sum(perf2) - 1
+  diff <- (mean(perf1[(n-2):n]) - mean(perf1[1:3])) / (
+     mean(perf2[(n-2):n]) - mean(perf2[1:3]))
+  return(cbind(m1 = m1, s1 = s1, m2 = m2, s2 = s2, 
+               total = total, diff = diff))  ## created a column-binding matrix
+}
+calc_outcomes(60, 50, 0.4, 0.7, time)
+perf <- calc_perf(max = 60, speed = 0.4, time = time)
+perf <- c(perf, calc_perf(max = 50, speed = 0.7, time = time))
+times <- rep(time, 2)          
+condition <- c(rep("treatment", length(time)), 
+               rep("control", length(time)))
+##run calc_perf with identified params,then combine params in two groups.Time is the trigger to combine them. Given that we have the perf for the first 12 times and the perf for the second 12 times, we need to replicate the time by 2. Use rep fuction to assign relative perf to each group which are named treatment and control. 
+qplot(y = perf, x = times, colour = condition, ylim = c(0, 100))+
+  scale_color_viridis(discrete = TRUE) 
+##why we need this scale_color_viridis?
+# SM: Because I am colorblind and the green-red scheme in 
+# ggplot is difficult on my eyes.
+```
+
+
+Ok, I am not sure it's realistic that the treatment group has 
+lower performance at the start but that's driven by the lack
+of an intercept which I would ignore for the moment. The general
+dynamic seems right. The good performers are not necessarily 
+learning very quick but they are learning towards a higher
+maximum capacity.
+
+### Reworking the parameters
+
+Another way to think about the speed of learning is to think 
+about how long it takes ($t_{20}$) before performance is at 20.
+
+$$
+\begin{aligned}
+M (1 - e^{-St_{20}}) &= 20 \\
+-ln(1 - 20/M)/S &= t_{20} \\
+-ln(1 - 20/M)/t_{20} &= S 
+\end{aligned}
+$$
+
+
+```{r}
+calc_t20 <- function(M, S){-log(1 - 20/M) / S}
+t20 <- calc_t20(60, .4)
+calc_S <- function(M, t20){-log(1 - 20/M) / t20}
+S <- calc_S(60, t20)
+t20_1 <- calc_t20(60, .4)
+t20_2 <- calc_t20(50, .7)
+cat(t20_1, t20_2)
+```
+
+At least the difference is not that big anymore. 
+
+## Simulating a dataset
+
+There are different ways to go about this. 
+
+### Random structural parameters
+
+This basically assumes that there are different types of people
+
+```{r}
+calc_diff <- function(x){
+  n <- length(x)
+  mean(x[(n-2):n]) - mean(x[1:3])
+}
+N <- 50
+treatM <- 80 * rbeta(N, .5, .5) + 20
+treatt20 <- exp(rnorm(N, -.2, sqrt(2 * (log(1) + .2)))) ##?##
+treatS <- calc_S(treatM, treatt20)
+treat_data <- t(mapply(calc_perf, treatM, treatS))
+treat_total <- apply(treat_data, 1, sum)
+treat_diff <- apply(treat_data, 1, calc_diff)
+
+contrM <- 80 * rbeta(N,  3/8, 5/8) + 20
+contrt20 <- exp(rnorm(N, -0.5, sqrt(2 * (log(0.7) + .5))))##?##
+contrS <- calc_S(contrM,contrt20)
+contr_data <- t(mapply(calc_perf, contrM, contrS))
+contr_total <- apply(contr_data, 1, sum)
+contr_diff <- apply(contr_data, 1, calc_diff)
+
+qplot(y = c(treat_total, contr_total),
+      x = c(rep("treatment", N), rep("control", N)))
+t.test(treat_total, contr_total)
+qplot(y = c(treat_diff, contr_diff),
+      x = c(rep("treatment", N), rep("control", N)))
+t.test(treat_diff, contr_diff)
+```
+```{r}
+c <- matrix(NA,81,2)
+for (N in 20:100) {
+treatM <- 80 * rbeta(N, .5, .5) + 20
+treatt20 <- exp(rnorm(N, -.2, sqrt(2 * (log(1) + .2)))) ##?##
+treatS <- calc_S(treatM, treatt20)
+treat_data <- t(mapply(calc_perf, treatM, treatS))
+treat_total <- apply(treat_data, 1, sum)
+treat_diff <- apply(treat_data, 1, calc_diff)
+ 
+contrM <- 80 * rbeta(N,  3/8, 5/8) + 20
+contrt20 <- exp(rnorm(N, -0.5, sqrt(2 * (log(0.7) + .5))))##?##
+contrS <- calc_S(contrM,contrt20)
+contr_data <- t(mapply(calc_perf, contrM, contrS))
+contr_total <- apply(contr_data, 1, sum)
+contr_diff <- apply(contr_data, 1, calc_diff)
+t <- t.test(treat_total, contr_total)
+c[N-19,] <- cbind(N,t$p.value)
+}
+plot(c)
+```
+```{r}
+c <- matrix(NA,481,2)
+for (N in 20:500) {
+   treatM <- 80 * rbeta(N, .5, .5) + 20
+   treatt20 <- exp(rnorm(N, -.2, sqrt(2 * (log(1) + .2)))) ##?##
+   treatS <- calc_S(treatM, treatt20)
+   treat_data <- t(mapply(calc_perf, treatM, treatS))
+   treat_total <- apply(treat_data, 1, sum)
+   treat_diff <- apply(treat_data, 1, calc_diff)
+   contrM <- 80 * rbeta(N,  3/8, 5/8) + 20
+   contrt20 <- exp(rnorm(N, -0.5, sqrt(2 * (log(0.7) + .5))))##?##
+   contrS <- calc_S(contrM,contrt20)
+   contr_data <- t(mapply(calc_perf, contrM, contrS))
+   contr_total <- apply(contr_data, 1, sum)
+   contr_diff <- apply(contr_data, 1, calc_diff)
+   t <- t.test(treat_total, contr_total)
+   c[N-19,] <- cbind(N,t$p.value)
+}
+
+plot(c)
+```
+
+## Simulating studies
+
+### Beta distribution
+
+The beta distribution $B(\alpha, \beta)$ stays between 0 and 1.
+The mean is given by $\frac{\alpha}{\alpha + \beta}$ and the
+variance is given by 
+$\frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1)}$
+
+$$
+\begin{aligned}
+M &= \frac{\alpha}{\alpha + \beta} 
+& V &= \frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1)} \\
+\end{aligned}
+$$
+If we set $\alpha = 4 - \beta$.
+
+$$
+\begin{aligned}
+M &= \frac{\alpha}{4}
+& V &= \frac{4 \alpha - \alpha^2}{80} 
+& \sigma &= \sqrt{\frac{4\alpha - \alpha^2}{80}}\\
+\end{aligned}
+$$
+```{r}
+alpha = seq(0, 4, length.out = 21)
+round(sqrt((4 * alpha - alpha^2) / (16 * 5)), 2)
+```
+The difference in standard deviations is not going to be too
+big as long as we are not too close to 4 or 0 for $\alpha$.
+
+### log normal
+
+The log normal distribution is always positive which makes it a
+good distribution to generate simulated speed. A 
+$lognormal(\mu,\sigma)$ has an expected value of 
+$exp(\mu + \frac{\sigma^2}{2})$ and a variance of 
+$\left[\exp \left(\sigma^{2}\right)-1\right] \exp \left(2 \mu+\sigma^{2}\right)$
+
+$$
+\begin{aligned}
+M &= \exp(\mu + \frac{\sigma^2}{2})
+&V &= \left[\exp \left(\sigma^{2}\right)-1\right] \exp \left(2 \mu+\sigma^{2}\right) \\
+2(\ln(M) - \mu) &= \sigma^2 \\ 
+M^2 &= exp(2\mu + \sigma^2) & V &= 
+\left[\exp^2(\ln(M) - \mu) - 1 \right] M^2 \\
+ & &V &= \frac{M^4}{\exp^2(\mu)} - M^2
+\end{aligned} 
+$$
+
+```{r}
+fixed_sd = 1
+trial20 = seq(0.20, 20, .2)
+mu = log(sqrt(trial20^4 / (4 + trial20^2)))
+sigma2 = 2*(log(trial20) - mu)
+```
+
+### Trial 20% of Maximum Score
+
+I use the parametrisation for trial20%. It's a ad-hoc but it 
+allows to take into account the negative relation between M and
+S. The code allows for a fixed sd of .5 trial which is double the
+difference between the two conditions.
+
+### Function
+
+```{r}
+calc_diff <- function(x, t0 = 1, t1 = 3, t2 = 10, t3 = 12){
+  n <- length(x)
+  mean(x[t2:t3]) - mean(x[t0:t1])
+}
+
+run_study <- function(N = 20, tM = 60, cM = 50, 
+                  tS = .4, cS = .7, delay_treat = 7,
+                  fixed_sd = 1, beta_curve = 2,
+                  noise = FALSE, noise_param = 5){
+  talpha <- beta_curve * (tM - 20)/80; 
+  calpha <- beta_curve * (cM - 20)/80
+  treatM <- 80 * rbeta(N, talpha, beta_curve - talpha) + 20
+  contrM <- 80 * rbeta(N, calpha, beta_curve - calpha) + 20
+  delayM1 <- 80 * rbeta(N, calpha, beta_curve - calpha) + 20
+  delayM2 <- pmin(100, delayM1 - cM + tM) # treatment
+  
+  tt20 <- calc_t20(tM, tS); ct20 <- calc_t20(cM, cS)
+  tmu <- log(sqrt(tt20^4 / (fixed_sd^2 + tt20^2)))
+  cmu <- log(sqrt(ct20^4 / (fixed_sd^2 + ct20^2)))
+  treatt20 <- exp(rnorm(N, tmu, sqrt(2 * (log(tt20) - tmu))))
+  contrt20 <- exp(rnorm(N, cmu, sqrt(2 * (log(ct20) - cmu))))
+  delayt201 <- exp(rnorm(N, cmu, sqrt(2 * (log(ct20) - cmu))))
+  delayt202 <- contrt20 - ct20 + tt20 # treatment
+  treatS <- calc_S(treatM, treatt20)
+  contrS <- calc_S(contrM, contrt20)
+  delayS1 <- calc_S(delayM1, delayt201)
+  delayS2 <- calc_S(delayM2, delayt202)
+  
+  treat_data <- t(mapply(calc_perf, treatM, treatS))
+  contr_data <- t(mapply(calc_perf, contrM, contrS))
+  treat_delay_data1 <- t(mapply(calc_perf, delayM1, delayS1, 
+                               list(1:(delay_treat - 1))))
+  delay_eq_time <- calc_time(delayM2, delayS2, 
+                             treat_delay_data1[, (delay_treat - 1)])
+  delay_time2 <- lapply(delay_eq_time, 
+    function(x){(x + 1) : (x + 1 + (12 - delay_treat))})
+  treat_delay_data2 <- t(mapply(calc_perf, delayM2, delayS2, 
+                                delay_time2))
+  if (noise){
+    add_noise <- function(x) rbinom(1, noise_param, x/100)
+    contr_data <- apply(contr_data, 1:2, add_noise)
+    treat_data <- apply(treat_data, 1:2, add_noise)
+    treat_delay_data1 <- apply(treat_delay_data1, 1:2, add_noise)
+    treat_delay_data2 <- apply(treat_delay_data2, 1:2, add_noise)
+  }
+  
+  return(list(
+    control = contr_data, treatment = treat_data,
+    delay = cbind(treat_delay_data1, treat_delay_data2),
+    delay_treat = delay_treat))
+}
+st <- run_study(N = 20, fixed_sd = 1, beta_curve = 1, noise = T)
+
+analyse_study <- function(data){
+  t1 <- data$delay_treat - 1; t2 <- data$delay_treat
+  calc_diff_delay <- function(x){calc_diff(x, t1 = t1, t2 = t2)}
+  calc_diff_delay2 <- function(x){calc_diff(x, t1 = t1, 
+                                            t2 = t2, t3 = 8)}
+  treat_total <- apply(data$treatment, 1, sum)
+  treat_diff <- apply(data$treatment, 1, calc_diff)
+  contr_total <- apply(data$control, 1, sum)
+  contr_diff <- apply(data$control, 1, calc_diff)
+  contr_diff_delay <- apply(data$control, 1, calc_diff_delay)
+  contr_diff_delay2 <- apply(data$control, 1, calc_diff_delay)
+  delay_diff <- apply(data$delay, 1, calc_diff_delay)
+  delay_diff2 <- apply(data$delay, 1, calc_diff_delay2)
+  ttest_total <- t.test(treat_total, contr_total)
+  ttest_diff <- t.test(treat_diff, contr_diff)
+  ttest_diff_delay <- t.test(delay_diff, contr_diff_delay)
+  ttest_diff_delay2 <- t.test(delay_diff2, contr_diff_delay2)
+  return(list(ttest_total = ttest_total, 
+              ttest_diff = ttest_diff,
+              ttest_diff_delay = ttest_diff_delay,
+              ttest_diff_delay2 = ttest_diff_delay2))
+}
+
+an <- analyse_study(st)
+an$ttest_diff_delay2$statistic
+```
+
+The `beta_curve` parameter controls the between subject variation
+in the parameter `M`. The higher `beta_curve` the lower the
+variation.^[`beta_curve = 2` is close to uniform.]. The
+`fixed_sd` parameter controls the variation in trial20 between
+participants. The variation is same between control and
+treatment. The higher `fixed_sd` the higher the variation. The
+`noise` and `noise_param` paramters control the within participant
+variation. The lower the `noise_param`, the lower the variation.
+
+The `delay_treat` is the trial where the treatment gets started.
+`ttest_diff_delay` is the ttest where each subjects' difference
+between control and treatment is calculated. For instance,
+if the treatment is delayed until trial 7, this test calculates
+the difference between the average of trial 7-12 and the average
+of 1-6. The `ttest_diff_delay` does the same but ignores 
+trials 9-12. This allows us to have a look whether we can get
+away with 8 trials instead of 12. We can then use the trials 9-12
+for 
+
+## Run a simulation
+
+```{r, fig.margin = TRUE, fig.height = 6}
+nsim <- 500
+run_sim <- function(...){
+  st <- run_study(...) 
+  an <- analyse_study(st)
+  return(cbind(difft = an$ttest_diff$statistic,
+               diffp = an$ttest_diff$p.value,
+               totalt = an$ttest_total$statistic,
+               totalp = an$ttest_total$p.value,
+               delayt = an$ttest_diff_delay$statistic,
+               delayp = an$ttest_diff_delay$p.value,
+               delay2t = an$ttest_diff_delay2$statistic,
+               delay2p = an$ttest_diff_delay2$p.value))
+}
+simulation <- t(drop(replicate(nsim, run_sim(
+  N = 50, beta_curve = 2, delay_treat = 5, fixed_sd = 1,
+  noise = TRUE, noise_param = 5))))
+sim_data <- as_tibble(simulation)
+xlims = c(-3,12)
+diffplot <- qplot(sim_data$difft, bins = nsim/20, xlim = xlims)
+totalplot <- qplot(sim_data$totalt, bins = nsim/20, xlim = xlims)
+delayplot <- qplot(sim_data$delayt, bins = nsim/20, xlim = xlims)
+delay2plot <- qplot(sim_data$delay2t, bins = nsim/20, xlim = xlims)
+plot_grid(totalplot, diffplot, delayplot, delay2plot, ncol = 1)
+power <- function(x, q){
+  mean(I(x < q))
+}
+select(sim_data, ends_with("p")) %>%
+  gather(key = "test", value = "p") %>%
+  group_by(test) %>%
+  summarise_all(list(power001 = function(x){power(x, 0.001)},
+                     power010 = function(x){power(x, 0.01)},
+                     power050 = function(x){power(x, 0.05)}))
+```
+
+## Some Simulations.
+
+### Baseline
+
+Moderate between and within variation. 
+
+```{r baseline}
+Ns <- c(20, 30, 40, 50)
+simulation <- vector("list", length = length(N))
+for (i in 1:length(Ns)){
+  simulation[[i]] <- t(drop(replicate(nsim, run_sim(
+    N = Ns[i], beta_curve = 2, fixed_sd = .5, noise = TRUE,
+    noise_param = 20, delay_treat = 7))))
+}
+for (i in 1:length(simulation)){
+  sim_data = as_tibble(simulation[[i]])
+  select(sim_data, ends_with("p")) %>%
+    gather(key = "test", value = "p") %>%
+    group_by(test) %>%
+    summarise_all(list(power001 = function(x){power(x, 0.001)},
+                       power010 = function(x){power(x, 0.01)},
+                       power050 = function(x){power(x, 0.05)})) %>%
+    print(kable(booktabs = TRUE))
+}
+```
+
+### Earlier treatment
+
+```{r early-treatment}
+Ns <- c(20, 30, 40, 50)
+simulation <- vector("list", length = length(N))
+for (i in 1:length(Ns)){
+  simulation[[i]] <- t(drop(replicate(nsim, run_sim(
+    N = Ns[i], beta_curve = 2, fixed_sd = .5, noise = TRUE,
+    noise_param = 20, delay_treat = 4))))
+}
+for (i in 1:length(simulation)){
+  sim_data = as_tibble(simulation[[i]])
+  select(sim_data, ends_with("p")) %>%
+    gather(key = "test", value = "p") %>%
+    group_by(test) %>%
+    summarise_all(list(power001 = function(x){power(x, 0.001)},
+                       power010 = function(x){power(x, 0.01)},
+                       power050 = function(x){power(x, 0.05)})) %>%
+    print(kable(booktabs = TRUE))
+}
+```
+
+The difference between 8 trial and 12 trials is smaller now but
+it still does not seem worthwile doing. Let's stick with the 12
+trials.
+
+### Worst Case Scenario
+
+A lot of noise and a lot of within participant variation.
+
+```{r wcs}
+Ns <- c(20, 30, 40, 50)
+simulation <- vector("list", length = length(N))
+for (i in 1:length(Ns)){
+  simulation[[i]] <- t(drop(replicate(nsim, run_sim(
+    N = Ns[i], beta_curve = 1, fixed_sd = 2, noise = TRUE,
+    noise_param = 5, delay_treat = 7))))
+}
+for (i in 1:length(simulation)){
+  sim_data = as_tibble(simulation[[i]])
+  select(sim_data, ends_with("p")) %>%
+    gather(key = "test", value = "p") %>%
+    group_by(test) %>%
+    summarise_all(list(power001 = function(x){power(x, 0.001)},
+                       power010 = function(x){power(x, 0.01)},
+                       power050 = function(x){power(x, 0.05)})) %>%
+    print(kable(booktabs = TRUE))
+}
+```
+
+Even in this worst case scenario. 50 participants per case still
+gives us almost 80% power to detect the effect at 5% significance.
+We only need to design the experiment with a within subject
+treatment and control. This worst case scenario is representative
+for the measures of whether participant will make a dominated 
+choice or not. That measure is more noisy because the choice
+is either wrong or it is not.
+
+### Best Case Scenario
+
+Limited within subject variation and low noise.
+
+```{r bcs}
+Ns <- c(20, 30, 40, 50)
+simulation <- vector("list", length = length(N))
+for (i in 1:length(Ns)){
+  simulation[[i]] <- t(drop(replicate(nsim, run_sim(
+    N = Ns[i], beta_curve = 8, fixed_sd = .25, noise = TRUE,
+    noise_param = 50, delay_treat = 7))))
+}
+for (i in 1:length(simulation)){
+  sim_data = as_tibble(simulation[[i]])
+  select(sim_data, ends_with("p")) %>%
+    gather(key = "test", value = "p") %>%
+    group_by(test) %>%
+    summarise_all(list(power001 = function(x){power(x, 0.001)},
+                       power010 = function(x){power(x, 0.01)},
+                       power050 = function(x){power(x, 0.05)})) %>%
+    print(kable(booktabs = TRUE))
+}
+```
+
+In this case, the between subjects last 3 - first 3 trials 
+measure is slightly superior. However, the effect is neglible
+with sufficient trials. Again, this is in the best case scenario.
+
+### No noise baseline
+
+Just because we can
+
+```{r no-noise}
+Ns <- c(20, 30, 40, 50)
+simulation <- vector("list", length = length(N))
+for (i in 1:length(Ns)){
+  simulation[[i]] <- t(drop(replicate(nsim, run_sim(
+    N = Ns[i], beta_curve = 2, fixed_sd = .5, noise = FALSE,
+    delay_treat = 7))))
+}
+for (i in 1:length(simulation)){
+  sim_data = as_tibble(simulation[[i]])
+  select(sim_data, ends_with("p")) %>%
+    gather(key = "test", value = "p") %>%
+    group_by(test) %>%
+    summarise_all(list(power001 = function(x){power(x, 0.001)},
+                       power010 = function(x){power(x, 0.01)},
+                       power050 = function(x){power(x, 0.05)})) %>%
+    print(kable(booktabs = TRUE))
+}
+```

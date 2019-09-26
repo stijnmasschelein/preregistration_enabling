@@ -1,0 +1,824 @@
+---
+title: "Preregistration Experimental Design and Analysis"
+output: 
+  tufte::tufte_html:
+    tufte_features: ["fonts", "italics"]
+bibliography: "enabling.bib" 
+---
+
+This is the full document for the power analysis, the 
+pre-registration of the main analysis, and the sequential 
+analysis of the experiment on enabling control systems by 
+Frank Ma and Stijn Masschelein.
+
+```{r}
+set.seed(230383)
+library(tidyverse)
+library(cowplot)
+ggplot2::theme_set(tint::theme_tint())
+```
+
+# Model and Parameters
+
+## Model and Helper functions
+
+Our model of learning over time is a relatively simple two
+parameter model where $M$ captures the maximimum performance
+and $S$ the speed of learning. $y$ is performance over time $t$.
+
+```{marginfigure}
+$$
+y = M * (1 - e^{(-St)})
+$$
+```
+
+The following two functions allow to calculate performance and 
+time from the other variables.
+
+```{r}
+calc_perf <- function(max = 100, speed = 1, time = 1:12){
+  performance = max * (1 - exp(-time * speed))
+}
+calc_time <- function(max = 100, speed = 1, performance = 50){
+  time = - (log ((max - performance)/max))/speed 
+}
+```
+
+## Rough effect size estimate and parameters. 
+
+The t-statistics in @hannan_effects_2008 for a similar effect as
+the one we expect to see in our experiment is $t = 1$ for the
+effect on total performance and $t = 2$ for the effect on
+learning (= trial 10-12 - trial 1-3).  More specifically, they
+find that the group with fine feedback has about $9\%$ better
+performance and improves $3$ times as much compared to the group
+with no feedback in the individual incentive condition.
+
+With some trial and error searching we found that the effect
+sizes are roughly equivalent to a control condition with 
+$M = 50$ and $S = .7$ and a treatment condition of $M = 60$ and
+$S = .4$ for a task where the theoretical maximum performance is
+100.
+
+## Reworking the parameters
+
+Another way to think about the speed of learning is to think 
+about how long it takes ($t_{20}$) before performance is at 20 
+out of a theoretical maximum of 100. 
+
+```{marginfigure}
+$$
+M (1 - e^{-St_{20}}) = 20 \\
+-ln(1 - 20/M)/S = t_{20} \\
+-ln(1 - 20/M)/t_{20} = S 
+$$
+```
+
+And the functions to make those calculations in `R`.
+
+```{r}
+calc_t20 <- function(M, S){-log(1 - 20/M) / S}
+t20 <- calc_t20(60, .4)
+calc_S <- function(M, t20){-log(1 - 20/M) / t20}
+S <- calc_S(60, t20)
+t20_1 <- calc_t20(60, .4)
+t20_2 <- calc_t20(50, .7)
+cat(t20_1, t20_2)
+```
+
+# Simulation and Power
+
+The simulation uses the parametrisation for trial20. That means
+that the fundamental parameter for each participant are 
+`trial20` ^[how quickly does the particpant reach 20% of 
+the theoretical] and `M` ^[What is the maximum score of that 
+participant]. It's a ad-hoc but it allows to take into account
+a negative relation between M and S. 
+
+## Function
+
+The following function runs a study with `N` participants in 
+a control group and treatment group. Where `tM` and `tS` are the
+parameters for the average individual in the treatment group and
+`cM` and `cS` are the parameters for the average individual in
+the control group.
+
+### Helper
+
+```{r}
+calc_diff <- function(x, t0 = 1, t1 = 3, t2 = 10, t3 = 12){
+  n <- length(x)
+  mean(x[t2:t3]) - mean(x[t0:t1])
+}
+```
+
+### Single study
+
+```{r}
+run_study <- function(N = 20, tM = 60, cM = 50, 
+                  tS = .4, cS = .7, delay_treat = 7,
+                  fixed_sd = 1, beta_curve = 2,
+                  noise = FALSE, noise_param = 5){
+  talpha <- beta_curve * (tM - 20)/80; 
+  calpha <- beta_curve * (cM - 20)/80
+  treatM <- 80 * rbeta(N, talpha, beta_curve - talpha) + 20
+  contrM <- 80 * rbeta(N, calpha, beta_curve - calpha) + 20
+  delayM1 <- 80 * rbeta(N, calpha, beta_curve - calpha) + 20
+  delayM2 <- pmin(100, delayM1 - cM + tM) # treatment
+  
+  tt20 <- calc_t20(tM, tS); ct20 <- calc_t20(cM, cS)
+  tmu <- log(sqrt(tt20^4 / (fixed_sd^2 + tt20^2)))
+  cmu <- log(sqrt(ct20^4 / (fixed_sd^2 + ct20^2)))
+  treatt20 <- exp(rnorm(N, tmu, sqrt(2 * (log(tt20) - tmu))))
+  contrt20 <- exp(rnorm(N, cmu, sqrt(2 * (log(ct20) - cmu))))
+  delayt201 <- exp(rnorm(N, cmu, sqrt(2 * (log(ct20) - cmu))))
+  delayt202 <- contrt20 - ct20 + tt20 # treatment
+  treatS <- calc_S(treatM, treatt20)
+  contrS <- calc_S(contrM, contrt20)
+  delayS1 <- calc_S(delayM1, delayt201)
+  delayS2 <- calc_S(delayM2, delayt202)
+  
+  treat_data <- t(mapply(calc_perf, treatM, treatS))
+  contr_data <- t(mapply(calc_perf, contrM, contrS))
+  treat_delay_data1 <- t(mapply(calc_perf, delayM1, delayS1, 
+                               list(1:(delay_treat - 1))))
+  delay_eq_time <- calc_time(delayM2, delayS2, 
+                             treat_delay_data1[, (delay_treat - 1)])
+  delay_time2 <- lapply(delay_eq_time, 
+    function(x){(x + 1) : (x + 1 + (12 - delay_treat))})
+  treat_delay_data2 <- t(mapply(calc_perf, delayM2, delayS2, 
+                                delay_time2))
+  if (noise){
+    add_noise <- function(x) rbinom(1, noise_param, x/100)
+    contr_data <- apply(contr_data, 1:2, add_noise)
+    treat_data <- apply(treat_data, 1:2, add_noise)
+    treat_delay_data1 <- apply(treat_delay_data1, 1:2, add_noise)
+    treat_delay_data2 <- apply(treat_delay_data2, 1:2, add_noise)
+  }
+  
+  return(list(
+    control = contr_data, treatment = treat_data,
+    delay = cbind(treat_delay_data1, treat_delay_data2),
+    delay_treat = delay_treat))
+}
+st <- run_study(N = 20, fixed_sd = 1, beta_curve = 1, noise = T)
+```
+
+The `beta_curve` parameter controls the between subject variation
+in the parameter `M`. The higher `beta_curve` the lower the
+variation.^[`beta_curve = 2` is close to uniform. See the
+appendix for more details.] The `fixed_sd` parameter controls the
+variation in trial20 between participants. The variation is same
+between control and treatment. The higher `fixed_sd` the higher
+the variation. The `noise` and `noise_param` parameters control
+the within participant variation. The lower the `noise_param`,
+the lower the variation.
+
+### Analyse a single study
+
+```{r}
+analyse_study <- function(data){
+  t1 <- data$delay_treat - 1; t2 <- data$delay_treat
+  calc_diff_delay <- function(x){calc_diff(x, t1 = t1, t2 = t2)}
+  calc_diff_delay2 <- function(x){calc_diff(x, t1 = t1, 
+                                            t2 = t2, t3 = 8)}
+  treat_total <- apply(data$treatment, 1, sum)
+  treat_diff <- apply(data$treatment, 1, calc_diff)
+  contr_total <- apply(data$control, 1, sum)
+  contr_diff <- apply(data$control, 1, calc_diff)
+  contr_diff_delay <- apply(data$control, 1, calc_diff_delay)
+  contr_diff_delay2 <- apply(data$control, 1, calc_diff_delay)
+  delay_diff <- apply(data$delay, 1, calc_diff_delay)
+  delay_diff2 <- apply(data$delay, 1, calc_diff_delay2)
+  ttest_total <- t.test(treat_total, contr_total)
+  ttest_diff <- t.test(treat_diff, contr_diff)
+  ttest_diff_delay <- t.test(delay_diff, contr_diff_delay)
+  ttest_diff_delay2 <- t.test(delay_diff2, contr_diff_delay2)
+  return(list(ttest_total = ttest_total, 
+              ttest_diff = ttest_diff,
+              ttest_diff_delay = ttest_diff_delay,
+              ttest_diff_delay2 = ttest_diff_delay2))
+}
+
+an <- analyse_study(st)
+an$ttest_diff_delay2$statistic
+```
+
+The `delay_treat` is the trial where the treatment gets started.
+`ttest_diff_delay` is the ttest where each subjects' difference
+between control and treatment is calculated. For instance,
+if the treatment is delayed until trial 7, this test calculates
+the difference between the average of trial 7-12 and the average
+of 1-6. The `ttest_diff_delay` does the same but ignores 
+trials 9-12. This allows us to have a look whether we can get
+away with 8 trials instead of 12. We can then use the trials 9-12
+for 
+
+## Simulation
+
+```{marginfigure}
+More extensive simulations are run in the other file 
+`simulation.Rmd` which shows more details on our trial and 
+error process.
+```
+
+### Simulation function
+
+```{r, fig.margin = TRUE, fig.height = 6}
+nsim <- 50
+run_sim <- function(...){
+  st <- run_study(...) 
+  an <- analyse_study(st)
+  return(cbind(difft = an$ttest_diff$statistic,
+               diffp = an$ttest_diff$p.value,
+               totalt = an$ttest_total$statistic,
+               totalp = an$ttest_total$p.value,
+               delayt = an$ttest_diff_delay$statistic,
+               delayp = an$ttest_diff_delay$p.value,
+               delay2t = an$ttest_diff_delay2$statistic,
+               delay2p = an$ttest_diff_delay2$p.value))
+}
+simulation <- t(drop(replicate(nsim, run_sim(
+  N = 50, beta_curve = 2, delay_treat = 5, fixed_sd = 1,
+  noise = TRUE, noise_param = 5))))
+sim_data <- as_tibble(simulation)
+xlims = c(-3,12)
+diffplot <- qplot(sim_data$difft, bins = nsim/20, xlim = xlims)
+totalplot <- qplot(sim_data$totalt, bins = nsim/20, xlim = xlims)
+delayplot <- qplot(sim_data$delayt, bins = nsim/20, xlim = xlims)
+delay2plot <- qplot(sim_data$delay2t, bins = nsim/20, xlim = xlims)
+plot_grid(totalplot, diffplot, delayplot, delay2plot, ncol = 1)
+power <- function(x, q){
+  mean(I(x < q))
+}
+select(sim_data, ends_with("p")) %>%
+  gather(key = "test", value = "p") %>%
+  group_by(test) %>%
+  summarise_all(list(power001 = function(x){power(x, 0.001)},
+                     power010 = function(x){power(x, 0.01)},
+                     power050 = function(x){power(x, 0.05)}))
+```
+
+### Variation in the parameters not in the effect size.
+
+```{r sim-params}
+nsim <- 1e3
+Ns <- sample(seq(20, 60, 1), size = nsim, replace = TRUE)
+betas <- runif(nsim, 1, 8)
+sds <- runif(nsim, .5, 2)
+noise <- TRUE
+noise_param <- sample(seq(5, 50, 1), size = nsim,
+                      replace = TRUE)
+```
+
+### Run the simulation
+
+```{r sim, eval=TRUE}
+simulation <- vector("list", length = length(nsim))
+for (i in 1:nsim){
+  simulation[[i]] <- do.call(run_sim,
+                             list(N = Ns[i], 
+                                  beta_curve = betas[i], 
+                                  fixed_sd = sds[i], 
+                                  noise = noise, 
+                                  noise_param = noise_param[i],
+                                  delay_treat = 7)
+  )
+  if (i %% (nsim %/% 20) == 0) {
+    cat(paste0(i, "/", nsim, " done", "\n"))}
+}
+```
+
+```{r run_as_job, eval=FALSE}
+rstudioapi::jobRunScript("run_simulation.R", importEnv = TRUE,
+                         workingDir = here::here(),
+                         exportEnv = "R_GlobalEnv")
+```
+
+```{r results}
+s = lapply(simulation, as.tibble)
+d = bind_rows(s) %>%
+  mutate(N = Ns, beta_curve = betas, 
+         fixed_sd = sds, noise_param = noise_param) %>%
+  select(-delay2p, -delay2t) %>%
+  gather(key = "statistic", value = "value",
+         totalt, totalp, delayt, delayp, difft, diffp)
+```
+
+## Some Results
+
+The plot shows the p-value for 1000 tests of the 3 tests. Two of
+the tests are the standard tests where the experiment is run as 
+a between subjects experiment with either total performance 
+(`totalp`) or the difference between the last 6 trials and the
+first 6 trials as the dependent variable (`diffp`). The third
+test simulates an experiment with a control condition for 
+every participant in the trial 1-6 and the treatment for half
+the participants in trial 7-12. The advantage of the latter test
+is that it can control for between participant differences in 
+speed of learning.
+
+The graph plots the logarithm of the p-values for the tests with
+the parameter controlling the variability in learning speeds on 
+the x-axis. It's clear that at higher variability the blue dots
+remain at lower values but the green dots tend to cluster higher.
+
+```{r}
+ggplot(filter(d, grepl("p", statistic)),
+       aes(y = value, x = fixed_sd, 
+           colour = statistic)) +
+  geom_point(size = 1) +
+  viridis::scale_colour_viridis(discrete = TRUE) +
+  scale_y_log10() 
+```
+
+We can also see this in the Table below where power to detect 
+an effect at $\alpha = .001, 0.01, 0.05$ is calculated for 
+high and low N per condition and for high and low variability
+in speed of learning. 
+
+```{r}
+filter(d, grepl("p", statistic)) %>%
+  group_by(I(N > 30), I(fixed_sd > 1), statistic) %>%
+  summarise(p001 = mean(value < 0.001),
+            p010 = mean(value < 0.010),
+            p050 = mean(value < 0.050)) %>% 
+  kableExtra::kable(dig = 2)
+```
+
+## Conclusion.
+
+> The first conclusion we reach is that a delayed introduction of
+the treatment can be beneficial because it increases the power
+of the experimental design to detect treatment differences when 
+there is a lot of variability in learning.
+
+We experimented somewhat with different delays and generally
+*introducing the treatment halfway* through the experiment seemed
+to be the best option. We also experimented with shorter
+experiments. However, an experiment with 8 trials had a lot 
+less power to detect the @hannan_effects_2008 effect.
+
+> The second conconclusion is that even in scenarios with a high
+level of variability the delayed introduction leads to high 
+power to detect the @hannan_effects_2008 effect with over 30
+observations per condition.
+
+We will use no more than 50 participants per condition. If an 
+experiment with 50 participants cannot detect the effect it is 
+likely smaller than the feedback effect in @hannan_effects_2008 
+and not of any economic interest.
+
+# Alpha Spending
+
+The power analysis shows that it is likely that we do not need
+50 participants per condition to detect an effect. We use
+the principles of sequential analysis [@lakens_performing_2014] and
+alpha spending [@demets-lan; @reboussin_computations_2000] to use
+a more flexible design plan.
+
+```{marginfigure}
+While uncorrected p-values cannot be used to look at the 
+intermediate data, the alpha spending approach spreads the
+Type I error rate over multiple looks at the data. The `ldbounds`
+package in `R` provides a quick implementation of the Lan-DeMets
+calculations.
+```
+
+We plan to have a first look at the data after `N = 15` in each
+condition and stop the data collection if the data indicate that
+there is less than 1 percent chance of a one-tailed Type I error
+in declaring a significant effect.
+
+```{marginfigure}
+We use one-tailed error rates because we have directional
+hypotheses and use the 1 percent cut-off to guard against any
+deviations from the assumptions underlying the Lan-Demets
+algorithm.
+```
+
+```{r}
+plan <- ldbounds::bounds(
+  t = seq(15, 50, 5)/50, iuse = 1, alpha = 0.01)
+summary(plan)
+```
+
+The plan shows that if the effect has a t-statistic of $4.6$
+after $N = 15$, we can stop the experiment with an expected Type
+I error rate of $0.01$ one-tailed.
+
+```{marginfigure}
+$N = 15$ implies that $15/50 = 30\%$ of the maximum sample size 
+has been collected. The code assumes a check every 5 participants
+per condition.
+```
+
+The cut-off values decrease as we get closer to the expected full
+sample of $N=50$. The attractiveness of this scheme is that it
+does not tie the lookups down. We can look more often or less
+often and recalculate the cutoffs as longs as we use the same
+spending function (i.e. `iuse = 1` in the `R` code).
+
+## Preregistered Analysis
+
+The data generation is more simple to account for the fact that
+the actual experiment has 6 conditions and because we want to 
+calculate other dependent variable than the ultimate outcome.
+
+### Participants
+
+```{r participants}
+ncond = 30
+participants = tibble(
+  id = 1:(6*ncond),
+  internal = rep(c("yes", "no"), each = ncond * 3),
+  flexibility = rep(c("yes", "yes", "no"), times = ncond * 2),
+  repair = rep(c("yes", "no", "no"), times = ncond * 2) 
+)
+```
+
+Quick check to see whether we have the right conditions.
+
+```{r check-participants}
+group_by(participants, internal, flexibility, repair) %>%
+  summarise(N = n()) %>%
+  kableExtra::kable()
+```
+
+### Generate decisions.
+
+The `generate_decisions` function creates decisions. We can turn
+on learning for good performance and off for bad performance.
+There are only two settings because this is very basic. The 
+learning is that the participant realises that they should
+take the feedback about getting or not getting a payoff into
+account for their next decision. This allows us to generate
+data that explicitly shows improvements in one of the specific
+elements of the experimental task.
+
+```{r generate-decisions}
+nperiods = 5; ntrials = 12; 
+nature = sample(1:20, 12)
+print(nature)
+
+generate_decision = function(learning = TRUE, p = 5, t = 12, 
+                             nature = 1:t){
+  decision = rep(NULL, p * t)
+  period = rep(NULL, p * t)
+  trial = rep(NULL, p * t)
+  state_of_nature = rep(NULL, p * t)
+  for (i in 1:t){
+  upper = 20; lower = 1;
+    for (j in 1:p){
+      index = j + (i - 1) * p
+      decision[index] = sample(lower:upper, 1)
+      period[index] = j; trial[index] = i; 
+      state_of_nature[index] = nature[i]
+      if (learning && i > t/2){
+        if(decision[index] > nature[i]){
+          upper = decision[index] - 1
+        } else {
+          lower = decision[index]
+        }
+      }
+    }
+  }
+  return(tibble(period = period, trial = trial,
+                decision = decision, nature = state_of_nature))
+}
+
+decision = generate_decision(nature = nature)
+head(decision) %>% kableExtra::kable()
+```
+
+### Full data
+
+```{r full-data}
+payoff = c(5, 5, 10, 20, 20, 30, 30, 30, 45, 45, 60, 60, 60, 
+           80, 80, 95, 95, 95, 100, 100)
+length(payoff)
+fd = mutate(
+  participants, 
+  decision = map(internal == "yes" & flexibility == "yes",
+    ~ generate_decision(learning = . , nature = nature))) %>% 
+  unnest(decision) %>%
+  mutate(performance = if_else(decision > nature, 0, payoff[decision]))
+kableExtra::kable(fd[1:8, ], )
+```
+
+The `fd` dataset had one observation per `period` and `trial` per
+participant `id`. The manipulation only works in the second half
+of the experiment (i.e. `trial > 7`). The simulated data has 
+the state of `nature`, the actual `decision`, 
+and the `performance` of the simulated participant. This allows
+us to calculate whether participants take into account the 
+implicit feedback they receive from the performance about the
+state of nature.
+
+### Results
+
+```{r other-dependent-variables}
+dominated = c(2, 5, 7, 8, 10, 12, 13, 15, 17, 18, 20)
+fb_learning = function(periods = 1:5, decisions, performance){
+  correct = 0; minimum = 1; maximum = 21;
+  for (p in periods){
+    d = decisions[p]
+    correct = correct + (d >= minimum & d < maximum) 
+    if (performance[p] == 0){
+      maximum = min(maximum, d)
+    } else {
+      minimum = max(minimum, d)
+    }
+  }
+  return(correct/length(periods))
+}
+fb_learning(decisions = fd$decision[1:5], 
+            performance = fd$performance[1:5])
+fb_learning(decisions = c(11, 3, 2, 6, 12), 
+            performance = c(0, 10, 5, 30, 0))
+fd = mutate(fd,
+            change_dominated = decision %in% dominated)
+
+trial = group_by(fd, id, trial, internal, flexibility, repair) %>%
+  summarise(fb_learning = fb_learning(period, decision, performance))
+kableExtra::kable(trial[1:8, ], )
+```
+
+```{r individual-performance}
+ind = group_by(fd, id, internal, flexibility, repair) %>%
+  summarise(
+    average = mean(performance),
+    change = mean(performance[trial > 6]) - 
+      mean(performance[trial < 7]),
+    change_dominated = mean(dominated[trial > 6]) - 
+      mean(dominated[trial < 7])
+  ) 
+
+ind_temp = group_by(trial, id, internal, flexibility, repair) %>%
+  summarise(
+    change_fb_learning = mean(fb_learning[trial > 6]) - 
+      mean(fb_learning[trial < 7]),
+  )
+
+ind = left_join(ind, ind_temp)
+print(ind)
+```
+
+```{r descriptive-statistics}
+skimr::skim_with(numeric = list(mean = mean, sd = sd, N = length),
+          append = FALSE)
+group_by(ind, internal, flexibility, repair) %>% 
+  skimr::skim(average)
+group_by(ind, internal, flexibility, repair) %>% 
+  skimr::skim(change)
+```
+
+### Descriptive Plot
+
+```{r}
+plot <- ggplot(ind, aes(x = interaction(flexibility, repair),
+                        y = change_fb_learning, 
+                        # group = interaction(flexibility, repair),
+                        group = internal,
+                        colour = internal)) +
+  geom_jitter(alpha = .5, width = .1) +
+  stat_summary(fun.y = "mean", geom = "line") + 
+  viridis::scale_colour_viridis(discrete = TRUE)
+print(plot)
+```
+
+> The main analysis below will be performed on four variables
+as defined above. The variables are
+
+1. The change in performance (`change`)
+2. The change in the number of dominated choices (`change_dominated`)
+3. The change in the number of wrong choices give the performance
+    feedback (`change_fb_learning`).
+4. The change in the number of optimal choices. This code for 
+    this variable still needs to be written.
+
+### Main Analysis
+
+We are interested in two interaction effects internal x 
+flexibility and internal x repair.
+
+```{r lm}
+d = ungroup(ind) %>%
+  select(internal, flexibility, repair, change) %>%
+  mutate(
+    main_internal = if_else(internal == "yes", 1, -1),
+    main_flexibility_repair = if_else(flexibility == "yes", 0.5, -1),
+    main_repair = case_when(
+      flexibility == "no" ~ 0,
+      flexibility == repair ~ 1,
+      flexibility != repair ~ -1), 
+    internal_flexibility = case_when(
+      repair == "yes" ~ 0,
+      internal != flexibility ~ -1,
+      internal == flexibility ~ 1),
+    internal_repair = case_when(
+      repair == "no" & flexibility == "yes" ~ 0,
+      internal != repair ~ -1,
+      internal == repair ~ 1)
+  )
+group_by(d, internal, flexibility, repair) %>%
+  summarise_all(mean) %>%
+  kableExtra::kable()
+
+reg = lm(
+  change ~ main_internal + main_flexibility_repair +
+    main_repair + internal_flexibility + internal_repair, 
+  data = d)
+
+```
+
+We apply the nearly exact adjustement proposed by
+@young_improved_2016 to have better estimates of the variance 
+covariance matrix. The adjustment is similar to the 
+Satterthwaite and Welch adjustments and can be intepreted as 
+a more general version of the Welch ANOVA and Welch t-test for
+unequal variances.
+
+```{marginfigure}
+The code for the adjustment can be found in the Appendix.
+```
+
+```{r nearly_exact_hidden, echo=FALSE, results="hide"}
+#' Install the sandwich package if necessary
+if (!require("sandwich")) install.packages("sandwich")
+
+#' Calculate the nearly exact bias and edf for the HC1 Variance
+#' Estimator.
+#' @param x design matrix of the regression
+#' @param w hypothesis test
+nearly_exact <- function(x, w){
+  N = nrow(x); k = ncol(x) - 1; c = N / (N - k);
+  xx <- solve(crossprod(x))
+  M = diag(rep(1, N)) - tcrossprod(x %*% xx, x)
+  z = tcrossprod(t(w) %*% xx, x); zz = z %*% t(z); z2 = z^2;
+  mu = c/zz * sum(z^2 * diag(M))
+  nu = 2 * c^2 / zz^2 * (tcrossprod(z2 %*% M^2, z2))
+  edf = 2 * mu^2 / nu
+  return(list(mu = as.numeric(mu), edf = as.numeric(edf)))
+}
+
+#' Calculate the coefficient table for the nearly
+#' exact bias and df correction.
+#' @param formula The regression formula as would be used with lm
+#' @param data A dataframe
+#' @param pdigits Number of digits to round the p-value
+
+lm_nearly <- function(formula, data, pdigits = 4){
+  reg <- lm(formula = formula, data = data)
+  x <- model.matrix(object = formula, data = data)
+  covHC <- sandwich::vcovHC(x = reg, type = "HC1")
+  seHC <- sqrt(diag(covHC)); varnames <- names(seHC); 
+  coefficients <- data.frame(matrix(nrow = length(varnames), ncol = 6))
+  names(coefficients) <- c("variable", "estimate", "se",
+                           "t value", "df", "p value")
+  coefficients$variable <- varnames
+  for (var in varnames){
+    hypothesis = I(varnames == var)
+    correction <- nearly_exact(x = x, w = hypothesis)
+    se = seHC[var] / sqrt(correction$mu)
+    stat <- reg$coefficients[var]/se
+    coefficients[coefficients$variable == var, 2:6] <- c(
+      reg$coefficients[var], se, stat, correction$edf, 
+      round(2 * pt(abs(stat), correction$edf, lower.tail = FALSE),
+            pdigits)
+    )
+  }
+  return(list(coefficients = coefficients, lm = reg))
+}
+
+#' Useage
+
+corrected <- lm_nearly(speed ~ dist, cars)
+print(corrected$coefficients, digits = 2)
+```
+
+```{r}
+reg_exact = lm_nearly(
+  change ~ main_internal + main_flexibility_repair +
+    main_repair + internal_flexibility + internal_repair, 
+  data = d) 
+kableExtra::kable(reg_exact$coefficients, dig = 3)
+```
+
+> The t-statistic for `internal_flexibility` and
+`internal_repair` will be monitored to assess whether the data
+collection can be stopped.
+
+# Appendix
+
+## Beta distribution
+
+The beta distribution $B(\alpha, \beta)$ stays between 0 and 1.
+The mean is given by $\frac{\alpha}{\alpha + \beta}$ and the
+variance is given by 
+$\frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1)}$
+
+```{marginfigure}
+$$
+M = \frac{\alpha}{\alpha + \beta} \\
+V = \frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1)}
+$$
+```  
+
+```{marginfigure}
+If we set $\alpha = 4 - \beta$.
+
+$$
+M = \frac{\alpha}{4}
+V = \frac{4 \alpha - \alpha^2}{80} \\
+\sigma = \sqrt{\frac{4\alpha - \alpha^2}{80}}\\
+$$
+```
+
+```{r}
+alpha = seq(0, 4, length.out = 21)
+round(sqrt((4 * alpha - alpha^2) / (16 * 5)), 2)
+```
+
+The difference in standard deviations is not going to be too
+big as long as we are not too close to 4 or 0 for $\alpha$.
+
+## log normal
+
+The log normal distribution is always positive which makes it a
+good distribution to generate simulated speed. A 
+$lognormal(\mu,\sigma)$ has an expected value of 
+$exp(\mu + \frac{\sigma^2}{2})$ and a variance of 
+$\left[\exp \left(\sigma^{2}\right)-1\right] \exp \left(2 \mu+\sigma^{2}\right)$
+
+$$
+\begin{aligned}
+M &= \exp(\mu + \frac{\sigma^2}{2})
+&V &= \left[\exp \left(\sigma^{2}\right)-1\right] \exp \left(2 \mu+\sigma^{2}\right) \\
+2(\ln(M) - \mu) &= \sigma^2 \\ 
+M^2 &= exp(2\mu + \sigma^2) & V &= 
+\left[\exp^2(\ln(M) - \mu) - 1 \right] M^2 \\
+ & &V &= \frac{M^4}{\exp^2(\mu)} - M^2
+\end{aligned} 
+$$
+
+
+## Nearly Exact Covariances.
+
+```{r nearly_exact, echo=TRUE, eval=FALSE}
+#' Install the sandwich package if necessary
+if (!require("sandwich")) install.packages("sandwich")
+
+#' Calculate the nearly exact bias and edf for the HC1 Variance
+#' Estimator.
+#' @param x design matrix of the regression
+#' @param w hypothesis test
+nearly_exact <- function(x, w){
+  N = nrow(x); k = ncol(x) - 1; c = N / (N - k);
+  xx <- solve(crossprod(x))
+  M = diag(rep(1, N)) - tcrossprod(x %*% xx, x)
+  z = tcrossprod(t(w) %*% xx, x); zz = z %*% t(z); z2 = z^2;
+  mu = c/zz * sum(z^2 * diag(M))
+  nu = 2 * c^2 / zz^2 * (tcrossprod(z2 %*% M^2, z2))
+  edf = 2 * mu^2 / nu
+  return(list(mu = as.numeric(mu), edf = as.numeric(edf)))
+}
+
+#' Calculate the coefficient table for the nearly
+#' exact bias and df correction.
+#' @param formula The regression formula as would be used with lm
+#' @param data A dataframe
+#' @param pdigits Number of digits to round the p-value
+
+lm_nearly <- function(formula, data, pdigits = 4){
+  reg <- lm(formula = formula, data = data)
+  x <- model.matrix(object = formula, data = data)
+  covHC <- sandwich::vcovHC(x = reg, type = "HC1")
+  seHC <- sqrt(diag(covHC)); varnames <- names(seHC); 
+  coefficients <- data.frame(matrix(nrow = length(varnames), ncol = 6))
+  names(coefficients) <- c("variable", "estimate", "se",
+                           "t value", "df", "p value")
+  coefficients$variable <- varnames
+  for (var in varnames){
+    hypothesis = I(varnames == var)
+    correction <- nearly_exact(x = x, w = hypothesis)
+    se = seHC[var] / sqrt(correction$mu)
+    stat <- reg$coefficients[var]/se
+    coefficients[coefficients$variable == var, 2:6] <- c(
+      reg$coefficients[var], se, stat, correction$edf, 
+      round(2 * pt(abs(stat), correction$edf, lower.tail = FALSE),
+            pdigits)
+    )
+  }
+  return(list(coefficients = coefficients, lm = reg))
+}
+
+#' Useage
+
+corrected <- lm_nearly(speed ~ dist, cars)
+print(corrected$coefficients, digits = 2)
+```
+
+
+# References
+
